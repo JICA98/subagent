@@ -1,99 +1,179 @@
 # Subagent MCP Server
 
-A Model Context Protocol (MCP) server written in Python using FastMCP, designed to execute subagent CLI commands (`agy` / `cmd` / `opencode` / `pi` / `codex`) via stdio.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![MCP Standard](https://img.shields.io/badge/MCP-Model%20Context%20Protocol-green.svg)](https://modelcontextprotocol.io)
+[![FastMCP](https://img.shields.io/badge/built%20with-FastMCP-purple.svg)](https://github.com/jlowin/fastmcp)
 
-## Overview
+A Model Context Protocol (MCP) server that provides a unified gateway to orchestrate and delegate tasks to external subagent CLI runners (**Codex**, **AGY**, **CMD**, **OpenCode**, and **Pi**).
 
-The `subagent` MCP server provides a lightweight gateway for MCP clients to invoke subagent CLI runners. It processes prompt requests by sanitizing newlines and executing `codex`, `agy`, `cmd`, `opencode`, or `pi` depending on the selected model:
-- `gpt-6-luna` / `codex` routes automatically to `codex`
-- `deepseek-v4-pro` routes automatically to `cmd`
-- `deepseek-v4-flash-free` and `muse-spark-1.3` route automatically to `opencode`
-- `pi/<provider>/<model>` models (e.g. `pi/stealth/ox-alpha`) route automatically to `pi`
-- All other models route to `agy`
+It enables LLM agents to spawn subagent coding sessions across specialized architectures (such as **GPT-6 Luna**, **Claude Sonnet/Opus 4.6**, **DeepSeek V4 Pro**, and **Gemini 3.8 Flash**), with real-time log streaming, synchronous/asynchronous execution, and full task lifecycle management.
 
-## Background Execution & Task Management
+---
 
-CLI runners (such as `codex exec`, `agy`, `cmd`, etc.) run as multi-step agentic sessions that think, run tools, and evaluate prompts; they do **not** return final text immediately. 
+## Architecture Overview
 
-To prevent MCP client timeouts on long-running tasks, the server supports:
-- **Immediate Task IDs**: Pass `background=True` to `prompt()` or `review()`, or call `manage_task(action="start", prompt="...")` to launch a task asynchronously and receive a `task_id` right away.
-- **Designated `/tmp` Output Directory**: Every task continuously streams real-time stdout and stderr into `/tmp/subagent_tasks/<task_id>.log`.
-- **`manage_task` Tool**: Allows agents to inspect, control, and extract outputs at any point.
+```
+                      ┌──────────────────────────────────────────┐
+                      │            Any MCP Client                │
+                      │ (Claude, Codex, Antigravity, OpenCode)   │
+                      └────────────────────┬─────────────────────┘
+                                           │ MCP (stdio)
+                                           ▼
+                      ┌──────────────────────────────────────────┐
+                      │          Subagent MCP Server             │
+                      │  (FastMCP, server.py, Task Registry)     │
+                      └────┬───────┬─────────┬─────────┬───────┬─┘
+                           │       │         │         │       │
+       ┌───────────────────┘       │         │         │       └──────────────────┐
+       ▼                           ▼         ▼         ▼                          ▼
+ ┌───────────┐               ┌─────────┐ ┌───────┐ ┌───────────┐            ┌───────────┐
+ │ Codex CLI │               │ AGY CLI │ │CMD CLI│ │ OpenCode  │            │  Pi CLI   │
+ │(GPT-6 Luna│               │(Claude, │ │(Deep- │ │(DeepSeek  │            │ (Stealth  │
+ │ & Astra)  │               │ Gemini) │ │ Seek) │ │  Flash)   │            │  Alpha)   │
+ └───────────┘               └─────────┘ └───────┘ └───────────┘            └───────────┘
+       │                           │         │         │                          │
+       └───────────────────────────┴────┬────┴─────────┴──────────────────────────┘
+                                        ▼
+                         ┌─────────────────────────────┐
+                         │   Real-time Disk Stream     │
+                         │ /tmp/subagent_tasks/*.log   │
+                         └─────────────────────────────┘
+```
 
-## Tools Exposed
+---
 
-- **`prompt`**: Accepts a string `prompt`, an optional `model` override, and an optional `background: bool = False` flag.
-  - When `background=False` (default): Executes synchronously and returns the output text prepended with `[Task ID: <task_id>]`, runner, model, status, and log file path (`/tmp/subagent_tasks/<task_id>.log`) so calling agents can independently verify and inspect the full subagent session logs.
-  - When `background=True`: Starts the task in the background and immediately returns a `task_id` with management instructions.
-- **`review`**: Accepts a string `prompt`, an optional `model` parameter (defaults to `"sonnet-4.6"`), and an optional `background: bool = False` flag.
+## Key Features
 
-- **`manage_task`**: Manages subagent background and foreground tasks:
-  - `action="peek"`: Peeks at the latest output lines of a running or completed task (`max_lines` controls line count, default 50).
-  - `action="status"`: Checks current status (`RUNNING`, `COMPLETED`, `FAILED`, `KILLED`, `TIMEOUT`), execution duration, exit code, and log file path.
-  - `action="write_output"`: Flushes/writes the task's output to the designated directory `/tmp/subagent_tasks/<task_id>_output.txt` (or custom `output_file`), enabling agents to read the file directly from disk via file viewing tools.
-  - `action="kill"`: Cancels and terminates a running task subprocess.
-  - `action="list"`: Lists all tracked tasks with their status, model, runner, and log paths.
-  - `action="wait"`: Waits for a running task to complete (up to `timeout` seconds, default 60).
-  - `action="start"`: Launches a new background task with `prompt` and optional `model`.
-- **`model`**: Sets or gets the default active model for subsequent prompt tool calls.
-  - Calling `model()` without arguments returns the current active model state.
-  - Calling `model(model_name="<model>")` sets the active model.
+- **Multi-Model Routing**: Automatically maps model names and aliases to the proper CLI backend (e.g. `gpt-6-luna` &rarr; `codex exec`, `deepseek-v4-pro` &rarr; `cmd`, `sonnet-4.6` &rarr; `agy`).
+- **Flexible Execution Modes**:
+  - **Synchronous (`background=false`, default)**: Waits for the subagent to finish and returns the output directly, prepended with a metadata header containing the **Task ID**, status, and live log file path for independent verification.
+  - **Asynchronous (`background=true`)**: Launches the process in the background and returns a unique `task_id` in milliseconds, preventing client timeouts during heavy operations.
+- **Real-Time Live Logging**: Subprocess output streams directly to `/tmp/subagent_tasks/<task_id>.log` (customizable via `SUBAGENT_TASKS_DIR`) as it executes, enabling concurrent progress inspection.
+- **Task Management Tool (`manage_task`)**: Inspect task status, peek at tailing output, terminate running processes, or flush logs to dedicated files for file-viewing tools.
+- **Zero Hardcoded Paths**: Binary locations are dynamically discovered from `PATH`, user home directories, or customizable via environment variables (`SUBAGENT_CODEX_PATH`, `SUBAGENT_AGY_PATH`, etc.).
 
-### Model Capabilities & Automatic Routing
+---
 
-Both `prompt` and `review` tools advertise supported models in their MCP parameter descriptions:
-- `gpt-6-luna` / `gpt 6 luna` / `codex` / `luna`: GPT-6 Luna (automatically routes to `codex`)
-- `codex/<model>`: Routes any model to `codex` (e.g. `codex/gpt-6-astra`, `codex/gpt-6-sol`)
-- `deepseek-v4-pro` / `deepseek`: DeepSeek V4 Pro (automatically routes to `cmd`)
-- `claude-sonnet-4-6` / `sonnet-4.6`: Claude Sonnet 4.6 (Thinking) (routes to `agy`)
-- `claude-opus-4-6-thinking` / `opus-4.6`: Claude Opus 4.6 (Thinking) (routes to `agy`)
-- `gemini-3.8-flash-high` / `medium` / `low` / `gemini-3.8-flash`: Gemini 3.8 Flash (routes to `agy`)
-- `gemini-3.7-flash-high` / `medium` / `low` / `gemini-3.7-flash`: Gemini 3.7 Flash (routes to `agy`)
-- `gpt-oss-120b-medium`: GPT-OSS 120B (Medium) (routes to `agy`)
-- `deepseek-v4-flash-free`: DeepSeek V4 Flash Free (routes to `opencode`)
-- `muse-spark-1.3` / `muse-spark`: Muse Spark 1.3 (routes to `opencode`)
-- `pi/stealth/ox-alpha` / `ox-alpha`: Pi coding agent via stealth ox-alpha (routes to `pi`; any `pi/<provider>/<model>` identifier works)
+## Model Routing Matrix
 
-## MCP Client Configuration
+| Model Identifier / Aliases | Target CLI Runner | Common Use Cases |
+| :--- | :--- | :--- |
+| `gpt-6-luna`, `gpt 6 luna`, `codex`, `luna` | **Codex CLI** (`codex exec`) | Autonomous code synthesis, deep debugging, sandbox-bypassed tool execution |
+| `codex/<model>` *(e.g. `codex/gpt-6-astra`)* | **Codex CLI** (`codex exec`) | Any model hosted within the Codex ecosystem |
+| `deepseek-v4-pro`, `deepseek` | **CMD CLI** (`cmd`) | High-reasoning algorithmic problems, mathematical logic |
+| `claude-sonnet-4-6`, `sonnet-4.6` | **AGY CLI** (`agy`) | General software engineering, feature development, code refactoring |
+| `claude-opus-4-6-thinking`, `opus-4.6` | **AGY CLI** (`agy`) | Architectural design, critical code review |
+| `gemini-3.8-flash-high` / `medium` / `low` | **AGY CLI** (`agy`) | Fast high-throughput coding, large-context exploration |
+| `gemini-3.7-flash-high` / `medium` / `low` | **AGY CLI** (`agy`) | Rapid iterative changes |
+| `gpt-oss-120b-medium`, `gpt-oss` | **AGY CLI** (`agy`) | Open-source foundation models |
+| `deepseek-v4-flash-free` | **OpenCode CLI** (`opencode`) | OpenCode free-tier model tasks |
+| `muse-spark-1.3`, `muse-spark` | **OpenCode CLI** (`opencode`) | Lightweight coding snippets |
+| `pi/stealth/ox-alpha`, `ox-alpha`, `pi` | **Pi CLI** (`pi`) | Terminal agent workflows |
 
-### Standard MCP Client (JSON Settings)
+---
 
-Add the following JSON snippet to your MCP client settings file:
+## Installation & Setup
+
+### 1. Clone the Repository
+
+```bash
+git clone https://github.com/JICA98/subagent.git
+cd subagent
+```
+
+### 2. Set Up Virtual Environment & Dependencies
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 3. Verify Local CLI Backends (Optional)
+
+The server automatically detects available CLIs from `PATH` and standard user directories (`~/.local/bin`, `~/.opencode/bin`, etc.). You only need to install the CLI runners you plan to use:
+
+- **Codex CLI**: `codex` (installed at `~/.local/bin/codex` or in `PATH`)
+- **AGY CLI**: `agy` (installed at `~/.local/bin/agy` or in `PATH`)
+- **CMD CLI**: `cmd` (in `PATH` or npm prefix)
+- **OpenCode CLI**: `opencode` (installed at `~/.opencode/bin/opencode` or in `PATH`)
+- **Pi CLI**: `pi` (in `PATH`)
+
+To override any binary path or the tasks directory, set environment variables:
+```bash
+export SUBAGENT_CODEX_PATH="/custom/path/to/codex"
+export SUBAGENT_AGY_PATH="/custom/path/to/agy"
+export SUBAGENT_TASKS_DIR="/custom/path/to/tasks"
+```
+
+---
+
+## MCP Client Configuration Guide
+
+Replace `/path/to/subagent` with the absolute path to your cloned `subagent` directory.
+
+### 1. Claude Code CLI
+
+Add directly to your global Claude Code configuration in `~/.claude.json` under `mcpServers`:
 
 ```json
 {
   "mcpServers": {
     "subagent": {
-      "command": "/home/jica/subagent/.venv/bin/python",
+      "type": "stdio",
+      "command": "/path/to/subagent/.venv/bin/python",
       "args": [
-        "/home/jica/subagent/server.py"
-      ],
-      "timeout": 2700000
+        "/path/to/subagent/server.py"
+      ]
     }
   }
 }
 ```
 
-### Grok Build CLI
-
-Add the server via CLI:
-
+Or add via the Claude CLI:
 ```bash
-grok mcp add subagent -- /home/jica/subagent/.venv/bin/python /home/jica/subagent/server.py
+claude mcp add subagent /path/to/subagent/.venv/bin/python /path/to/subagent/server.py
 ```
 
-Or add directly to `~/.grok/config.toml`:
+### 2. Claude Desktop
+
+Add to your `claude_desktop_config.json`:
+- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Linux**: `~/.config/Claude/claude_desktop_config.json`
+- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "subagent": {
+      "command": "/path/to/subagent/.venv/bin/python",
+      "args": [
+        "/path/to/subagent/server.py"
+      ]
+    }
+  }
+}
+```
+
+### 3. Codex CLI
+
+Add to `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.subagent]
-command = "/home/jica/subagent/.venv/bin/python"
-args = ["/home/jica/subagent/server.py"]
-enabled = true
+command = "/path/to/subagent/.venv/bin/python"
+args = ["/path/to/subagent/server.py"]
 ```
 
-### OpenCode CLI
+Or add via CLI:
+```bash
+codex mcp add subagent -- /path/to/subagent/.venv/bin/python /path/to/subagent/server.py
+```
 
-Configured in `~/.config/opencode/opencode.jsonc`:
+### 4. OpenCode CLI
+
+Add to `~/.config/opencode/opencode.jsonc`:
 
 ```json
 {
@@ -102,28 +182,180 @@ Configured in `~/.config/opencode/opencode.jsonc`:
     "subagent": {
       "type": "local",
       "command": [
-        "/home/jica/subagent/.venv/bin/python",
-        "/home/jica/subagent/server.py"
+        "/path/to/subagent/.venv/bin/python",
+        "/path/to/subagent/server.py"
       ]
     }
   }
 }
 ```
 
-### Codex CLI
+### 5. Grok Build CLI
 
-Configured in `~/.codex/config.toml`:
+Add via CLI:
+```bash
+grok mcp add subagent -- /path/to/subagent/.venv/bin/python /path/to/subagent/server.py
+```
 
+Or add to `~/.grok/config.toml`:
 ```toml
 [mcp_servers.subagent]
-command = "/home/jica/subagent/.venv/bin/python"
-args = ["/home/jica/subagent/server.py"]
+command = "/path/to/subagent/.venv/bin/python"
+args = ["/path/to/subagent/server.py"]
+enabled = true
 ```
+
+### 6. Standard / Generic MCP Clients
+
+```json
+{
+  "mcpServers": {
+    "subagent": {
+      "command": "/path/to/subagent/.venv/bin/python",
+      "args": [
+        "/path/to/subagent/server.py"
+      ],
+      "timeout": 2700000
+    }
+  }
+}
+```
+
+---
+
+## Tools Exposed
+
+### 1. `prompt`
+
+Executes a prompt through the resolved subagent runner.
+
+| Parameter | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `prompt` | `string` | **Yes** | The prompt instruction to execute (newlines are sanitized). |
+| `model` | `string` | No | Model identifier or alias (e.g. `'gpt-6-luna'`, `'sonnet-4.6'`). Defaults to active model or agy default. |
+| `background` | `boolean` | No | Defaults to `false`. When `true`, spawns a background process and immediately returns the `task_id`. |
+
+#### Example: Synchronous Call
+```json
+{
+  "prompt": "Write a Python script to check website SSL certificate expiration",
+  "model": "gpt-6-luna"
+}
+```
+
+**Response Format**:
+```text
+[Task ID: task_20260927_222848_c390aa]
+Runner: codex | Model: gpt-6-luna | Status: COMPLETED | Log: /tmp/subagent_tasks/task_20260927_222848_c390aa.log
+
+<Output returned by the subagent>
+```
+
+#### Example: Background Call
+```json
+{
+  "prompt": "Refactor database migrations and verify backwards compatibility",
+  "model": "gpt-6-luna",
+  "background": true
+}
+```
+
+**Immediate Response**:
+```text
+Task started in background with ID: task_20260927_222922_e3d8bc
+Runner: codex
+Model: gpt-6-luna
+Log file: /tmp/subagent_tasks/task_20260927_222922_e3d8bc.log
+Status: RUNNING
+
+Manage this task using:
+- manage_task(action='peek', task_id='task_20260927_222922_e3d8bc') - View live output
+- manage_task(action='status', task_id='task_20260927_222922_e3d8bc') - Check task status
+- manage_task(action='write_output', task_id='task_20260927_222922_e3d8bc') - Write output to /tmp
+- manage_task(action='wait', task_id='task_20260927_222922_e3d8bc') - Wait for completion
+- manage_task(action='kill', task_id='task_20260927_222922_e3d8bc') - Cancel task
+```
+
+---
+
+### 2. `review`
+
+Specialized wrapper for code or document reviews.
+
+| Parameter | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `prompt` | `string` | **Yes** | Review prompt or code diff to analyze. |
+| `model` | `string` | No | Defaults to `'sonnet-4.6'`. |
+| `background` | `boolean` | No | Defaults to `false`. |
+
+---
+
+### 3. `manage_task`
+
+Controls and inspects tasks across their lifecycle.
+
+| Parameter | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `action` | `string` | **Yes** | `'status'`, `'peek'`, `'write_output'`, `'kill'`, `'wait'`, `'list'`, or `'start'`. |
+| `task_id` | `string` | *For most actions* | The ID of the task to manage. |
+| `max_lines` | `integer` | No | Number of tail lines when `action='peek'` (default `50`). |
+| `output_file` | `string` | No | Custom path to save output when `action='write_output'`. |
+| `timeout` | `integer` | No | Maximum wait duration in seconds when `action='wait'` (default `60`). |
+| `prompt` | `string` | *For start* | Prompt text when `action='start'`. |
+| `model` | `string` | No | Model identifier when `action='start'`. |
+
+#### Actions Reference:
+- **`status`**: Returns task status (`RUNNING`, `COMPLETED`, `FAILED`, `KILLED`, `TIMEOUT`), execution duration, exit code, and log file path.
+- **`peek`**: Returns the latest lines of task output in real time without blocking.
+- **`write_output`**: Flushes output to `/tmp/subagent_tasks/<task_id>_output.txt` (or custom `output_file`) so agents can read it directly from disk.
+- **`kill`**: Cancels and terminates a running task process.
+- **`wait`**: Waits for a background task to complete and returns its output.
+- **`list`**: Lists all active and past tasks.
+- **`start`**: Convenience action to start a background task directly.
+
+---
+
+### 4. `model`
+
+Sets or inspects the active session model default.
+
+- `model()` &rarr; Returns current active model.
+- `model(model_name="gpt-6-luna")` &rarr; Sets default model for subsequent prompt calls.
+
+---
+
+## Agent Skills Integration
+
+A ready-to-use agent skill is included in [`skills/subagent/SKILL.md`](skills/subagent/SKILL.md).
+
+To make it globally available across all agent conversations on your system:
+```bash
+mkdir -p ~/.agents/skills/subagent
+cp skills/subagent/SKILL.md ~/.agents/skills/subagent/
+```
+
+Any agent with skills support will automatically discover the skill, know how to route models, and understand how to manage tasks via `manage_task`.
+
+---
 
 ## Testing
 
-Run unit test verification:
+Run unit and integration tests using pytest:
 
 ```bash
-/home/jica/subagent/.venv/bin/pytest /home/jica/subagent/test_server.py -v
+/path/to/subagent/.venv/bin/pytest test_server.py -v
 ```
+
+All 10 test suites verify:
+- Prompt newline sanitization
+- Global model state handling
+- Command building for all 5 CLI runners (Codex, AGY, CMD, OpenCode, Pi)
+- Model alias resolution and reasoning effort flags
+- Task lifecycle management (`status`, `peek`, `write_output`, `kill`, `wait`)
+- Synchronous task ID and log path metadata reporting
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).

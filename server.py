@@ -9,14 +9,30 @@ from fastmcp import FastMCP, Context
 mcp = FastMCP("subagent")
 
 _CURRENT_MODEL: Optional[str] = None
-TASKS_DIR = "/tmp/subagent_tasks"
+import tempfile
+
+TASKS_DIR = os.environ.get("SUBAGENT_TASKS_DIR") or os.path.join(tempfile.gettempdir(), "subagent_tasks")
 os.makedirs(TASKS_DIR, exist_ok=True)
 
-AGY_PATH = "/home/jica/.local/bin/agy"
-CMD_PATH = shutil.which("cmd") or "/home/jica/.nvm/versions/node/v24.18.0/bin/cmd"
-OPENCODE_PATH = shutil.which("opencode") or "/home/jica/.opencode/bin/opencode"
-PI_PATH = shutil.which("pi") or "/home/jica/.nvm/versions/node/v24.18.0/bin/pi"
-CODEX_PATH = shutil.which("codex") or "/home/jica/.local/bin/codex"
+def _resolve_binary(name: str, fallback_paths: list[str]) -> str:
+    env_override = os.environ.get(f"SUBAGENT_{name.upper()}_PATH")
+    if env_override:
+        return env_override
+    which_path = shutil.which(name)
+    if which_path:
+        return which_path
+    for p in fallback_paths:
+        expanded = os.path.expanduser(p)
+        if os.path.exists(expanded) and os.access(expanded, os.X_OK):
+            return expanded
+    return os.path.expanduser(fallback_paths[0]) if fallback_paths else name
+
+AGY_PATH = _resolve_binary("agy", ["~/.local/bin/agy"])
+CMD_PATH = _resolve_binary("cmd", ["~/.local/bin/cmd"])
+OPENCODE_PATH = _resolve_binary("opencode", ["~/.opencode/bin/opencode", "~/.local/bin/opencode"])
+PI_PATH = _resolve_binary("pi", ["~/.local/bin/pi"])
+CODEX_PATH = _resolve_binary("codex", ["~/.local/bin/codex"])
+
 
 def sanitize_prompt(prompt: str) -> str:
     cleaned = prompt.replace("\r\n", "  ").replace("\n", " ").replace("\r", " ")

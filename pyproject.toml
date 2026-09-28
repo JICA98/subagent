@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "subagent-mcp"
+version = "0.2.0"
+description = "A Model Context Protocol (MCP) server for multi-model subagent delegation and task orchestration"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "JICA98" }
+]
+keywords = ["mcp", "subagent", "codex", "claude", "gemini", "deepseek", "fastmcp"]
+dependencies = [
+    "fastmcp>=0.1.0"
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0.0",
+    "anyio>=4.0.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/JICA98/subagent"
+Repository = "https://github.com/JICA98/subagent.git"
+Issues = "https://github.com/JICA98/subagent/issues"
